@@ -76,6 +76,8 @@ struct trapframe {
   /* 280 */ uint64 t6;
 };
 
+#include "pstat.h"
+
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
 // Per-process state
@@ -101,4 +103,17 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  // Phase 1: Adaptive Intelligence - Process Monitoring & Statistics
+  uint64 cputicks;         // Total CPU ticks used by this process
+  uint64 waitticks;        // Total ticks process spent in RUNNABLE state
+  uint64 sched_count;      // Total times selected by scheduler
+  uint64 switches;         // Total context switches out of this process
+  uint64 creation_tick;    // Clock tick when process was created
+  uint64 last_sched_tick;  // Clock tick when process was last scheduled
+  uint current_burst;      // Current CPU burst (ticks)
+  uint last_burst;         // Previous CPU burst duration (ticks)
+  uint est_burst;          // Estimated CPU burst length (EMA)
+  int proc_type;           // Classification: INTERACTIVE, CPU_BOUND, MIXED
 };
+

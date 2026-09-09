@@ -107,3 +107,39 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+// Phase 1: Retrieve process statistics table
+uint64
+sys_getprocinfo(void)
+{
+  int max_entries;
+  uint64 addr;
+
+  argint(0, &max_entries);
+  argaddr(1, &addr);
+
+  if (max_entries <= 0 || addr == 0)
+    return -1;
+
+  return get_proc_stats(addr, max_entries);
+}
+
+// Phase 1: Retrieve aggregate workload summary
+uint64
+sys_getworkload(void)
+{
+  uint64 addr;
+  struct workload_info winfo;
+
+  argaddr(0, &addr);
+  if (addr == 0)
+    return -1;
+
+  get_workload_stats(&winfo);
+
+  if (copyout(myproc()->pagetable, addr, (char *)&winfo, sizeof(winfo)) < 0)
+    return -1;
+
+  return 0;
+}
+

@@ -86,6 +86,8 @@ endif
 
 LDFLAGS = -z max-page-size=4096
 
+all: $K/kernel fs.img
+
 $K/kernel: $(OBJS) $K/kernel.ld
 	$(LD) $(LDFLAGS) -T $K/kernel.ld -o $K/kernel $(OBJS) 
 	$(OBJDUMP) -S $K/kernel > $K/kernel.asm
@@ -146,6 +148,10 @@ UPROGS=\
 	$U/_forphan\
 	$U/_dorphan\
 	$U/_sync\
+	$U/_monitor\
+	$U/_cpu_test\
+	$U/_sleep_test\
+	$U/_mixed_test\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

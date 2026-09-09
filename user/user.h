@@ -1,5 +1,7 @@
 #define SBRK_ERROR ((char *)-1)
 
+#include "kernel/pstat.h"
+
 struct stat;
 
 // system calls
@@ -25,6 +27,8 @@ char *sys_sbrk(int, int);
 int pause(int);
 int uptime(void);
 int sync(void);
+int getprocinfo(int, struct procinfo *);
+int getworkload(struct workload_info *);
 
 // ulib.c
 int stat(const char *, struct stat *);

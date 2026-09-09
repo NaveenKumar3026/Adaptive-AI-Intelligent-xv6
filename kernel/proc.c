@@ -146,6 +146,18 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  // Phase 1: Initialize process monitoring and scheduling metrics
+  p->cputicks = 0;
+  p->waitticks = 0;
+  p->sched_count = 0;
+  p->switches = 0;
+  p->creation_tick = ticks;
+  p->last_sched_tick = 0;
+  p->current_burst = 0;
+  p->last_burst = 0;
+  p->est_burst = 0;
+  p->proc_type = PROC_TYPE_INTERACTIVE;
+
   return p;
 }
 
@@ -169,6 +181,18 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+
+  // Phase 1: Reset statistics on free
+  p->cputicks = 0;
+  p->waitticks = 0;
+  p->sched_count = 0;
+  p->switches = 0;
+  p->creation_tick = 0;
+  p->last_sched_tick = 0;
+  p->current_burst = 0;
+  p->last_burst = 0;
+  p->est_burst = 0;
+  p->proc_type = PROC_TYPE_INTERACTIVE;
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -445,6 +469,8 @@ scheduler(void)
         // to release its lock and then reacquire it
         // before jumping back to us.
         p->state = RUNNING;
+        p->sched_count++;
+        p->last_sched_tick = ticks;
         c->proc = p;
         swtch(&c->context, &p->context);
 
@@ -483,6 +509,44 @@ sched(void)
     panic("sched RUNNING");
   if (intr_get())
     panic("sched interruptible");
+
+  // Track context switch out of the process
+  p->switches++;
+
+  // CPU burst calculation & estimation
+  if (p->state == SLEEPING || p->state == ZOMBIE) {
+    // Burst is complete because the process gave up the CPU voluntarily (I/O sleep or exit)
+    p->last_burst = p->current_burst;
+    if (p->est_burst == 0) {
+      p->est_burst = p->last_burst;
+    } else {
+      // Integer exponential moving average with alpha = 0.5: (actual + old_est) / 2
+      p->est_burst = (p->last_burst + p->est_burst) / 2;
+    }
+
+    // Deterministic classification based on estimated burst length
+    if (p->est_burst <= INTERACTIVE_BURST_THRESH)
+      p->proc_type = PROC_TYPE_INTERACTIVE;
+    else if (p->est_burst >= CPU_BOUND_BURST_THRESH)
+      p->proc_type = PROC_TYPE_CPU_BOUND;
+    else
+      p->proc_type = PROC_TYPE_MIXED;
+
+    p->current_burst = 0;
+  } else if (p->state == RUNNABLE) {
+    // Process was preempted (e.g. timer interrupt yield).
+    // The CPU burst is still ongoing; if current burst already exceeds the estimate,
+    // update the estimate so the process is classified accurately in real time.
+    if (p->current_burst > p->est_burst) {
+      p->est_burst = p->current_burst;
+      if (p->est_burst >= CPU_BOUND_BURST_THRESH)
+        p->proc_type = PROC_TYPE_CPU_BOUND;
+      else if (p->est_burst <= INTERACTIVE_BURST_THRESH)
+        p->proc_type = PROC_TYPE_INTERACTIVE;
+      else
+        p->proc_type = PROC_TYPE_MIXED;
+    }
+  }
 
   intena = mycpu()->intena;
   swtch(&p->context, &mycpu()->context);
@@ -690,3 +754,107 @@ procdump(void)
     printk("\n");
   }
 }
+
+// Phase 1: Accounting called on every clock tick (CPU 0) to increment waiting time
+// for all processes waiting in the RUNNABLE state.
+void
+clock_tick_accounting(void)
+{
+  struct proc *p;
+  for (p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if (p->state == RUNNABLE) {
+      p->waitticks++;
+    }
+    release(&p->lock);
+  }
+}
+
+// Phase 1: Retrieve process statistics for all active processes.
+// Safely streams each procinfo entry directly to the user address space.
+// Returns total active process count, or -1 on copyout failure.
+int
+get_proc_stats(uint64 dst_addr, int max_entries)
+{
+  struct proc *p;
+  struct proc *curr = myproc();
+  int count = 0;
+
+  for (p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if (p->state != UNUSED) {
+      if (count < max_entries) {
+        struct procinfo pi;
+        pi.pid = p->pid;
+        pi.ppid = p->parent ? p->parent->pid : 0;
+        safestrcpy(pi.name, p->name, sizeof(pi.name));
+        pi.state = p->state;
+        pi.cputicks = p->cputicks;
+        pi.waitticks = p->waitticks;
+        pi.sched_count = p->sched_count;
+        pi.switches = p->switches;
+        pi.creation_tick = p->creation_tick;
+        pi.last_sched_tick = p->last_sched_tick;
+        pi.current_burst = p->current_burst;
+        pi.last_burst = p->last_burst;
+        pi.est_burst = p->est_burst;
+        pi.proc_type = p->proc_type;
+        release(&p->lock);
+
+        uint64 target = dst_addr + (uint64)count * sizeof(struct procinfo);
+        if (copyout(curr->pagetable, target, (char *)&pi, sizeof(pi)) < 0)
+          return -1;
+      } else {
+        release(&p->lock);
+      }
+      count++;
+    } else {
+      release(&p->lock);
+    }
+  }
+  return count;
+}
+
+// Phase 1: Aggregate system workload statistics across all active processes.
+int
+get_workload_stats(struct workload_info *winfo)
+{
+  struct proc *p;
+  int runnable = 0, running = 0, sleeping = 0, total = 0;
+  int interactive = 0, cpu_bound = 0, mixed = 0;
+  uint total_burst = 0;
+
+  for (p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if (p->state != UNUSED) {
+      total++;
+      if (p->state == RUNNABLE)
+        runnable++;
+      else if (p->state == RUNNING)
+        running++;
+      else if (p->state == SLEEPING)
+        sleeping++;
+
+      total_burst += p->est_burst;
+      if (p->proc_type == PROC_TYPE_INTERACTIVE)
+        interactive++;
+      else if (p->proc_type == PROC_TYPE_CPU_BOUND)
+        cpu_bound++;
+      else if (p->proc_type == PROC_TYPE_MIXED)
+        mixed++;
+    }
+    release(&p->lock);
+  }
+
+  winfo->num_runnable = runnable;
+  winfo->num_running = running;
+  winfo->num_sleeping = sleeping;
+  winfo->num_total = total;
+  winfo->avg_est_burst = total > 0 ? (total_burst / total) : 0;
+  winfo->pct_interactive = total > 0 ? ((interactive * 100) / total) : 0;
+  winfo->pct_cpu_bound = total > 0 ? ((cpu_bound * 100) / total) : 0;
+  winfo->pct_mixed = total > 0 ? ((mixed * 100) / total) : 0;
+
+  return 0;
+}
+

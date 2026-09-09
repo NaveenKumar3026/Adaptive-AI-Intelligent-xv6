@@ -82,8 +82,24 @@ usertrap(void)
     kexit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if (which_dev == 2)
+  if (which_dev == 2) {
+    if (p != 0) {
+      acquire(&p->lock);
+      p->cputicks++;
+      p->current_burst++;
+      if (p->current_burst > p->est_burst) {
+        p->est_burst = p->current_burst;
+        if (p->est_burst >= CPU_BOUND_BURST_THRESH)
+          p->proc_type = PROC_TYPE_CPU_BOUND;
+        else if (p->est_burst <= INTERACTIVE_BURST_THRESH)
+          p->proc_type = PROC_TYPE_INTERACTIVE;
+        else
+          p->proc_type = PROC_TYPE_MIXED;
+      }
+      release(&p->lock);
+    }
     yield();
+  }
 
   prepare_return();
 
@@ -154,8 +170,23 @@ kerneltrap()
   }
 
   // give up the CPU if this is a timer interrupt.
-  if (which_dev == 2 && myproc() != 0)
+  if (which_dev == 2 && myproc() != 0) {
+    struct proc *p = myproc();
+    acquire(&p->lock);
+    p->cputicks++;
+    p->current_burst++;
+    if (p->current_burst > p->est_burst) {
+      p->est_burst = p->current_burst;
+      if (p->est_burst >= CPU_BOUND_BURST_THRESH)
+        p->proc_type = PROC_TYPE_CPU_BOUND;
+      else if (p->est_burst <= INTERACTIVE_BURST_THRESH)
+        p->proc_type = PROC_TYPE_INTERACTIVE;
+      else
+        p->proc_type = PROC_TYPE_MIXED;
+    }
+    release(&p->lock);
     yield();
+  }
 
   // the yield() may have caused some traps to occur,
   // so restore trap registers for use by kernelvec.S's sepc instruction.
@@ -171,6 +202,7 @@ clockintr()
     ticks++;
     wakeup(&ticks);
     release(&tickslock);
+    clock_tick_accounting();
   }
 
   // ask for the next timer interrupt. this also clears
