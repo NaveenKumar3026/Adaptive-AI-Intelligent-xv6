@@ -107,6 +107,10 @@ void            procdump(void);
 int             get_proc_stats(uint64, int);
 int             get_workload_stats(struct workload_info*);
 void            clock_tick_accounting(void);
+int             calc_dynamic_priority(struct proc*);
+uint            calc_time_slice(struct proc*);
+void            update_prediction_and_health(struct proc*);
+void            apply_self_healing(struct proc*);
 
 // swtch.S
 void            swtch(struct context*, struct context*);

@@ -152,6 +152,11 @@ UPROGS=\
 	$U/_cpu_test\
 	$U/_sleep_test\
 	$U/_mixed_test\
+	$U/_stable\
+	$U/_bursttest\
+	$U/_anomaly\
+	$U/_starve\
+
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

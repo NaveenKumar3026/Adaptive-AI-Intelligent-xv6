@@ -81,12 +81,14 @@ usertrap(void)
   if (killed(p))
     kexit(-1);
 
-  // give up the CPU if this is a timer interrupt.
+  // give up the CPU if this is a timer interrupt and time slice expired.
   if (which_dev == 2) {
     if (p != 0) {
+      int should_yield = 0;
       acquire(&p->lock);
       p->cputicks++;
       p->current_burst++;
+      p->ticks_in_slice++;
       if (p->current_burst > p->est_burst) {
         p->est_burst = p->current_burst;
         if (p->est_burst >= CPU_BOUND_BURST_THRESH)
@@ -96,9 +98,16 @@ usertrap(void)
         else
           p->proc_type = PROC_TYPE_MIXED;
       }
+      if (p->ticks_in_slice >= p->time_slice) {
+        p->ticks_in_slice = 0;
+        should_yield = 1;
+      }
       release(&p->lock);
+      if (should_yield)
+        yield();
+    } else {
+      yield();
     }
-    yield();
   }
 
   prepare_return();
@@ -169,12 +178,14 @@ kerneltrap()
     panic("kerneltrap");
   }
 
-  // give up the CPU if this is a timer interrupt.
+  // give up the CPU if this is a timer interrupt and time slice expired.
   if (which_dev == 2 && myproc() != 0) {
     struct proc *p = myproc();
+    int should_yield = 0;
     acquire(&p->lock);
     p->cputicks++;
     p->current_burst++;
+    p->ticks_in_slice++;
     if (p->current_burst > p->est_burst) {
       p->est_burst = p->current_burst;
       if (p->est_burst >= CPU_BOUND_BURST_THRESH)
@@ -184,8 +195,13 @@ kerneltrap()
       else
         p->proc_type = PROC_TYPE_MIXED;
     }
+    if (p->ticks_in_slice >= p->time_slice) {
+      p->ticks_in_slice = 0;
+      should_yield = 1;
+    }
     release(&p->lock);
-    yield();
+    if (should_yield)
+      yield();
   }
 
   // the yield() may have caused some traps to occur,

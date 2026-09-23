@@ -158,6 +158,21 @@ found:
   p->est_burst = 0;
   p->proc_type = PROC_TYPE_INTERACTIVE;
 
+  // Phase 2: Initialize priority and time slice
+  p->priority = PRIO_BASE_INTERACTIVE;
+  p->time_slice = 1;
+  p->ticks_in_slice = 0;
+
+  // Phase 3: Initialize Prediction, Anomaly Detection & Self-Healing
+  p->predicted_burst = 1;
+  p->prediction_error = 0;
+  p->burst_trend = 0;
+  p->anomaly_score = 0;
+  p->anomaly_flags = ANOMALY_NONE;
+  p->health_status = HEALTH_NORMAL;
+  p->healing_actions = 0;
+  p->last_heal_tick = 0;
+
   return p;
 }
 
@@ -193,6 +208,21 @@ freeproc(struct proc *p)
   p->last_burst = 0;
   p->est_burst = 0;
   p->proc_type = PROC_TYPE_INTERACTIVE;
+
+  // Phase 2: Reset priority and time slice
+  p->priority = PRIO_BASE_INTERACTIVE;
+  p->time_slice = 1;
+  p->ticks_in_slice = 0;
+
+  // Phase 3: Reset prediction & health
+  p->predicted_burst = 0;
+  p->prediction_error = 0;
+  p->burst_trend = 0;
+  p->anomaly_score = 0;
+  p->anomaly_flags = ANOMALY_NONE;
+  p->health_status = HEALTH_NORMAL;
+  p->healing_actions = 0;
+  p->last_heal_tick = 0;
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -438,10 +468,162 @@ kwait(uint64 addr)
   }
 }
 
+// Phase 2: Compute dynamic priority score for a process.
+// Score = BaseTypeScore + (AgingBonus * waitticks) - (BurstPenalty * est_burst)
+int
+calc_dynamic_priority(struct proc *p)
+{
+  int base;
+  if (p->proc_type == PROC_TYPE_INTERACTIVE)
+    base = PRIO_BASE_INTERACTIVE;
+  else if (p->proc_type == PROC_TYPE_MIXED)
+    base = PRIO_BASE_MIXED;
+  else
+    base = PRIO_BASE_CPU_BOUND;
+
+  int prio = base + (int)(p->waitticks * AGING_WEIGHT) - (int)(p->est_burst * BURST_PENALTY_WEIGHT);
+  if (prio < MIN_PRIORITY)
+    prio = MIN_PRIORITY;
+  if (prio > MAX_PRIORITY)
+    prio = MAX_PRIORITY;
+  return prio;
+}
+
+// Phase 2: Compute allocated execution time slice (in ticks) based on process type.
+// INTERACTIVE: 1 tick (responsive)
+// MIXED:       2 ticks
+// CPU_BOUND:   4 ticks (high throughput, fewer context switches)
+uint
+calc_time_slice(struct proc *p)
+{
+  if (p->proc_type == PROC_TYPE_INTERACTIVE)
+    return 1;
+  else if (p->proc_type == PROC_TYPE_MIXED)
+    return 2;
+  else
+    return 4;
+}
+
+// Phase 3: Apply safe, non-destructive self-healing to stabilize anomalous processes
+void
+apply_self_healing(struct proc *p)
+{
+  int healed = 0;
+
+  // Remedy 1: Starvation Mitigation - Boost Priority
+  if (p->anomaly_flags & ANOMALY_STARVATION) {
+    p->priority += 25;
+    if (p->priority > MAX_PRIORITY)
+      p->priority = MAX_PRIORITY;
+    p->time_slice = 2; // Guarantee at least 2 ticks to make progress
+    healed = 1;
+  }
+
+  // Remedy 2: Burst Surge & Instability Damping
+  if (p->anomaly_flags & (ANOMALY_BURST_SURGE | ANOMALY_INSTABILITY)) {
+    p->burst_trend = 0; // Dampen runaway linear trend
+    p->predicted_burst = p->est_burst; // Re-anchor prediction to baseline EMA
+    p->time_slice = calc_time_slice(p);
+    healed = 1;
+  }
+
+  // Remedy 3: Thrashing Mitigation
+  if (p->anomaly_flags & ANOMALY_THRASHING) {
+    p->time_slice = 2; // Provide moderate slice to prevent frequent context switches
+    healed = 1;
+  }
+
+  if (healed) {
+    p->healing_actions++;
+    p->last_heal_tick = ticks;
+    // Anomaly score is partially relieved following corrective action
+    if (p->anomaly_score > 20)
+      p->anomaly_score -= 15;
+    if (p->anomaly_score < 30)
+      p->health_status = HEALTH_NORMAL;
+    else if (p->anomaly_score < 70)
+      p->health_status = HEALTH_WARNING;
+  }
+}
+
+// Phase 3: Update workload prediction, calculate anomaly score, and classify health status
+void
+update_prediction_and_health(struct proc *p)
+{
+  uint actual = p->last_burst;
+
+  // 1. Prediction error calculation
+  if (p->predicted_burst > 0) {
+    if (actual >= p->predicted_burst)
+      p->prediction_error = actual - p->predicted_burst;
+    else
+      p->prediction_error = p->predicted_burst - actual;
+  } else {
+    p->prediction_error = 0;
+  }
+
+  // 2. Trend-Aware Integer Prediction Update
+  int current_diff = (int)actual - (int)p->est_burst;
+  p->burst_trend = (current_diff + p->burst_trend) / 2;
+
+  int next_pred = (int)p->est_burst + p->burst_trend;
+  if (next_pred < 1)
+    next_pred = 1;
+  p->predicted_burst = (uint)next_pred;
+
+  // 3. Anomaly Detection
+  int flags = ANOMALY_NONE;
+  int score = 0;
+
+  // Signal 1: Burst Surge (actual is much larger than predicted)
+  if (p->prediction_error >= BURST_SURGE_THRESH && actual > (p->predicted_burst * 2)) {
+    flags |= ANOMALY_BURST_SURGE;
+    score += 35;
+  }
+
+  // Signal 2: Starvation (waiting too long in RUNNABLE without being scheduled)
+  if (p->waitticks >= STARVATION_THRESH_TICKS) {
+    flags |= ANOMALY_STARVATION;
+    score += 40;
+  }
+
+  // Signal 3: Instability / High Prediction Error
+  if (p->prediction_error >= 6) {
+    flags |= ANOMALY_INSTABILITY;
+    score += 25;
+  }
+
+  // Signal 4: Thrashing (rapid switches relative to schedule count)
+  if (p->switches > (p->sched_count * 2) && p->sched_count > 5) {
+    flags |= ANOMALY_THRASHING;
+    score += 20;
+  }
+
+  score += (int)(p->prediction_error * 3);
+  if (score > MAX_ANOMALY_SCORE)
+    score = MAX_ANOMALY_SCORE;
+
+  p->anomaly_flags = flags;
+  p->anomaly_score = score;
+
+  // 4. Health Classification
+  if (p->anomaly_score >= 70)
+    p->health_status = HEALTH_CRITICAL;
+  else if (p->anomaly_score >= 30)
+    p->health_status = HEALTH_WARNING;
+  else
+    p->health_status = HEALTH_NORMAL;
+
+  // 5. Trigger Self-Healing if needed
+  if (p->health_status != HEALTH_NORMAL || (flags & ANOMALY_STARVATION)) {
+    apply_self_healing(p);
+  }
+}
+
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
 // Scheduler never returns.  It loops, doing:
-//  - choose a process to run.
+//  - choose a highest-dynamic-priority RUNNABLE process to run.
 //  - swtch to start running that process.
 //  - eventually that process transfers control
 //    via swtch back to the scheduler.
@@ -461,28 +643,48 @@ scheduler(void)
     intr_on();
     intr_off();
 
-    int found = 0;
+    struct proc *best_p = 0;
+    int best_prio = -1;
+
+    // Pass 1: Scan RUNNABLE processes to select the highest dynamic priority
     for (p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
       if (p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
+        p->priority = calc_dynamic_priority(p);
+        if (p->priority > best_prio) {
+          best_prio = p->priority;
+          best_p = p;
+        }
+      }
+      release(&p->lock);
+    }
+
+    // Pass 2: Dispatch the best candidate if still RUNNABLE
+    int dispatched = 0;
+    if (best_p != 0) {
+      acquire(&best_p->lock);
+      if (best_p->state == RUNNABLE) {
+        p = best_p;
         p->state = RUNNING;
         p->sched_count++;
         p->last_sched_tick = ticks;
+        p->time_slice = calc_time_slice(p);
+        p->ticks_in_slice = 0;
+        p->waitticks = 0; // Reset wait time upon gaining CPU
         c->proc = p;
         swtch(&c->context, &p->context);
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0;
-        found = 1;
+        dispatched = 1;
       }
-      release(&p->lock);
+      release(&best_p->lock);
     }
-    if (found == 0) {
-      // nothing to run; stop running on this core until an interrupt.
+
+    if (!dispatched) {
+      // nothing to run or candidate taken by another core;
+      // stop running on this core until an interrupt.
       asm volatile("wfi");
     }
   }
@@ -532,6 +734,9 @@ sched(void)
     else
       p->proc_type = PROC_TYPE_MIXED;
 
+    // Phase 3: Update prediction, compute anomaly score, and classify health
+    update_prediction_and_health(p);
+
     p->current_burst = 0;
   } else if (p->state == RUNNABLE) {
     // Process was preempted (e.g. timer interrupt yield).
@@ -545,6 +750,9 @@ sched(void)
         p->proc_type = PROC_TYPE_INTERACTIVE;
       else
         p->proc_type = PROC_TYPE_MIXED;
+
+      p->last_burst = p->current_burst;
+      update_prediction_and_health(p);
     }
   }
 
@@ -765,12 +973,22 @@ clock_tick_accounting(void)
     acquire(&p->lock);
     if (p->state == RUNNABLE) {
       p->waitticks++;
+      // Phase 3: Real-time starvation detection & self-healing
+      if (p->waitticks >= STARVATION_THRESH_TICKS && !(p->anomaly_flags & ANOMALY_STARVATION)) {
+        p->anomaly_flags |= ANOMALY_STARVATION;
+        p->anomaly_score = (p->anomaly_score + 40 > MAX_ANOMALY_SCORE) ? MAX_ANOMALY_SCORE : (p->anomaly_score + 40);
+        if (p->anomaly_score >= 70)
+          p->health_status = HEALTH_CRITICAL;
+        else
+          p->health_status = HEALTH_WARNING;
+        apply_self_healing(p);
+      }
     }
     release(&p->lock);
   }
 }
 
-// Phase 1: Retrieve process statistics for all active processes.
+// Phase 1 & 3: Retrieve process statistics for all active processes.
 // Safely streams each procinfo entry directly to the user address space.
 // Returns total active process count, or -1 on copyout failure.
 int
@@ -799,6 +1017,18 @@ get_proc_stats(uint64 dst_addr, int max_entries)
         pi.last_burst = p->last_burst;
         pi.est_burst = p->est_burst;
         pi.proc_type = p->proc_type;
+        pi.priority = p->priority;
+        pi.time_slice = p->time_slice;
+        pi.ticks_in_slice = p->ticks_in_slice;
+        
+        // Phase 3 fields
+        pi.predicted_burst = p->predicted_burst;
+        pi.prediction_error = p->prediction_error;
+        pi.anomaly_score = p->anomaly_score;
+        pi.anomaly_flags = p->anomaly_flags;
+        pi.health_status = p->health_status;
+        pi.healing_actions = p->healing_actions;
+        pi.last_heal_tick = p->last_heal_tick;
         release(&p->lock);
 
         uint64 target = dst_addr + (uint64)count * sizeof(struct procinfo);
@@ -815,13 +1045,14 @@ get_proc_stats(uint64 dst_addr, int max_entries)
   return count;
 }
 
-// Phase 1: Aggregate system workload statistics across all active processes.
+// Phase 1 & 3: Aggregate system workload statistics across all active processes.
 int
 get_workload_stats(struct workload_info *winfo)
 {
   struct proc *p;
   int runnable = 0, running = 0, sleeping = 0, total = 0;
   int interactive = 0, cpu_bound = 0, mixed = 0;
+  int healthy = 0, warning = 0, critical = 0, total_heals = 0;
   uint total_burst = 0;
 
   for (p = proc; p < &proc[NPROC]; p++) {
@@ -842,6 +1073,15 @@ get_workload_stats(struct workload_info *winfo)
         cpu_bound++;
       else if (p->proc_type == PROC_TYPE_MIXED)
         mixed++;
+
+      if (p->health_status == HEALTH_NORMAL)
+        healthy++;
+      else if (p->health_status == HEALTH_WARNING)
+        warning++;
+      else if (p->health_status == HEALTH_CRITICAL)
+        critical++;
+
+      total_heals += p->healing_actions;
     }
     release(&p->lock);
   }
@@ -854,6 +1094,11 @@ get_workload_stats(struct workload_info *winfo)
   winfo->pct_interactive = total > 0 ? ((interactive * 100) / total) : 0;
   winfo->pct_cpu_bound = total > 0 ? ((cpu_bound * 100) / total) : 0;
   winfo->pct_mixed = total > 0 ? ((mixed * 100) / total) : 0;
+
+  winfo->num_healthy = healthy;
+  winfo->num_warning = warning;
+  winfo->num_critical = critical;
+  winfo->total_healing_actions = total_heals;
 
   return 0;
 }

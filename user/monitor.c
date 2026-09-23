@@ -17,6 +17,12 @@ static const char *type_names[] = {
   [2] "MIXED      "
 };
 
+static const char *health_names[] = {
+  [0] "NORMAL  ",
+  [1] "WARNING ",
+  [2] "CRITICAL"
+};
+
 static void
 print_padded_str(const char *s, int width)
 {
@@ -70,19 +76,18 @@ display_monitor(void)
     return;
   }
 
-  printf("==============================================================================\n");
-  printf("                         ADAPTIVE XV6 PROCESS MONITOR                         \n");
-  printf("==============================================================================\n");
-  printf("PID    PPID   NAME            STATE       CPU   WAIT  SWITCHES  BURST  TYPE       \n");
-  printf("------------------------------------------------------------------------------\n");
+  printf("========================================================================================================\n");
+  printf("                                 ADAPTIVE INTELLIGENT XV6 PROCESS MONITOR                               \n");
+  printf("========================================================================================================\n");
+  printf("PID    NAME            STATE       CPU   WAIT  BURST  PRED  ERR  PRIO  ANOM  HEALS  HEALTH    TYPE       \n");
+  printf("--------------------------------------------------------------------------------------------------------\n");
 
   for (int i = 0; i < count; i++) {
     const char *st = (procs[i].state >= 0 && procs[i].state <= 5) ? state_names[procs[i].state] : "UNKNOWN ";
     const char *tp = (procs[i].proc_type >= 0 && procs[i].proc_type <= 2) ? type_names[procs[i].proc_type] : "UNKNOWN    ";
+    const char *hl = (procs[i].health_status >= 0 && procs[i].health_status <= 2) ? health_names[procs[i].health_status] : "UNKNOWN ";
 
     print_padded_num(procs[i].pid, 6);
-    printf(" ");
-    print_padded_num(procs[i].ppid, 6);
     printf(" ");
     print_padded_str(procs[i].name, 15);
     printf(" ");
@@ -92,20 +97,33 @@ display_monitor(void)
     printf(" ");
     print_padded_num(procs[i].waitticks, 5);
     printf(" ");
-    print_padded_num(procs[i].switches, 9);
-    printf(" ");
     print_padded_num(procs[i].est_burst, 6);
+    printf(" ");
+    print_padded_num(procs[i].predicted_burst, 5);
+    printf(" ");
+    print_padded_num(procs[i].prediction_error, 4);
+    printf(" ");
+    print_padded_num(procs[i].priority, 5);
+    printf(" ");
+    print_padded_num(procs[i].anomaly_score, 5);
+    printf(" ");
+    print_padded_num(procs[i].healing_actions, 6);
+    printf(" ");
+    print_padded_str(hl, 9);
     printf(" ");
     printf("%s\n", tp);
   }
 
-  printf("------------------------------------------------------------------------------\n");
+  printf("--------------------------------------------------------------------------------------------------------\n");
   printf("WORKLOAD SUMMARY:\n");
   printf("  Total Active: %d | Runnable: %d | Running: %d | Sleeping: %d\n",
          winfo.num_total, winfo.num_runnable, winfo.num_running, winfo.num_sleeping);
   printf("  Avg Est Burst: %u ticks | Interactive: %d%% | CPU-Bound: %d%% | Mixed: %d%%\n",
          winfo.avg_est_burst, winfo.pct_interactive, winfo.pct_cpu_bound, winfo.pct_mixed);
-  printf("==============================================================================\n\n");
+  printf("SYSTEM HEALTH SUMMARY:\n");
+  printf("  Healthy: %d | Warning: %d | Critical: %d | Total Healing Actions: %d\n",
+         winfo.num_healthy, winfo.num_warning, winfo.num_critical, winfo.total_healing_actions);
+  printf("========================================================================================================\n\n");
 }
 
 int

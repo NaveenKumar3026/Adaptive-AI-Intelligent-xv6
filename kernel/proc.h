@@ -115,5 +115,20 @@ struct proc {
   uint last_burst;         // Previous CPU burst duration (ticks)
   uint est_burst;          // Estimated CPU burst length (EMA)
   int proc_type;           // Classification: INTERACTIVE, CPU_BOUND, MIXED
+
+  // Phase 2: Adaptive Dynamic Priority & Time Slicing
+  int priority;            // Dynamic priority score
+  uint time_slice;         // Allocated execution time slice (ticks)
+  uint ticks_in_slice;     // Ticks executed in current time slice
+
+  // Phase 3: Intelligent Prediction, Anomaly Detection & Self-Healing
+  uint predicted_burst;    // Predicted next CPU burst length (ticks)
+  uint prediction_error;   // Absolute difference |actual - predicted|
+  int burst_trend;         // Integer linear trend of burst changes (+/- ticks)
+  int anomaly_score;       // Composite anomaly severity score (0 - 100)
+  int anomaly_flags;       // Active anomaly bitmask flags
+  int health_status;       // Health state: HEALTH_NORMAL, HEALTH_WARNING, HEALTH_CRITICAL
+  uint healing_actions;    // Cumulative count of safe self-healing actions applied
+  uint64 last_heal_tick;   // Timestamp of most recent self-healing action
 };
 
